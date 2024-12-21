@@ -92,7 +92,7 @@ def admin_dashboard():
         return redirect(url_for('login'))
     
     cur = mysql.connection.cursor()
-    
+
     # Récupérer les documents avec plus d'informations
     cur.execute("""
         SELECT d.reference, d.titre, d.type_document, d.annee_publication, 
@@ -107,19 +107,29 @@ def admin_dashboard():
         FROM utilisateurs
     """)
     utilisateurs = cur.fetchall()
-    
-    # Récupérer les emprunts en cours avec détails
+         # Récupérer les emprunts en cours avec tous les détails
     cur.execute("""
-        SELECT e.id_emprunt, u.nom as nom_utilisateur, d.titre as titre_document,
-               e.date_debut, e.date_fin, e.statut
+        SELECT 
+            e.id_emprunt,
+            u.nom AS nom_utilisateur,
+            d.titre AS titre_document,
+            DATE_FORMAT(e.date_debut, '%d/%m/%Y') AS date_debut,
+            DATE_FORMAT(e.date_fin, '%d/%m/%Y') AS date_fin,
+            e.statut,
+            CASE 
+                WHEN e.date_fin < CURRENT_DATE AND e.statut = 'en cours' THEN 'retard'
+                ELSE e.statut 
+            END AS statut_reel
         FROM emprunts e
         JOIN utilisateurs u ON e.id_utilisateur = u.id_utilisateur
         JOIN exemplaires ex ON e.id_exemplaire = ex.id_exemplaire
         JOIN documents d ON ex.reference_document = d.reference
         WHERE e.statut IN ('en cours', 'retard')
+        ORDER BY e.date_fin ASC
     """)
     emprunts = cur.fetchall()
-    
+    print("Emprunts trouvés:", emprunts)  # Ajout de cette ligne pour le débogage
+
     cur.close()
     return render_template('admin_dashboard.html', 
                          documents=documents,
@@ -330,39 +340,44 @@ def creer_emprunt():
 
 @app.route('/api/marquer-rendu/<int:id_emprunt>', methods=['POST'])
 def marquer_rendu(id_emprunt):
+    if 'admin_id' not in session:
+        return jsonify({'success': False, 'message': 'Non autorisé'}), 403
+    
     try:
         cur = mysql.connection.cursor()
         
-        # Mettre à jour l'emprunt
+        # Vérifier si l'emprunt existe et n'est pas déjà rendu
+        cur.execute("SELECT id_exemplaire, statut FROM emprunts WHERE id_emprunt = %s", (id_emprunt,))
+        emprunt = cur.fetchone()
+        
+        if not emprunt:
+            return jsonify({'success': False, 'message': 'Emprunt non trouvé'}), 404
+        
+        if emprunt[1] == 'rendu':
+            return jsonify({'success': False, 'message': 'Emprunt déjà rendu'}), 400
+        
+        # Mettre à jour le statut de l'emprunt
         cur.execute("""
             UPDATE emprunts 
-            SET statut = 'rendu', date_retour = CURRENT_DATE
+            SET statut = 'rendu', date_retour = CURRENT_TIMESTAMP 
             WHERE id_emprunt = %s
         """, (id_emprunt,))
-        
-        # Récupérer l'id de l'exemplaire
-        cur.execute("""
-            SELECT id_exemplaire FROM emprunts
-            WHERE id_emprunt = %s
-        """, (id_emprunt,))
-        id_exemplaire = cur.fetchone()[0]
         
         # Mettre à jour le statut de l'exemplaire
         cur.execute("""
             UPDATE exemplaires 
-            SET statut = 'en rayon'
+            SET statut = 'en rayon' 
             WHERE id_exemplaire = %s
-        """, (id_exemplaire,))
+        """, (emprunt[0],))
         
         mysql.connection.commit()
         cur.close()
-        return jsonify({'success': True})
+        
+        return jsonify({'success': True, 'message': 'Emprunt marqué comme rendu'})
+        
     except Exception as e:
-        print(f"Erreur: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': 'Erreur lors du retour'
-        })
+        return jsonify({'success': False, 'message': str(e)}), 500
+    
 @app.route('/logout')
 def logout():
     session.clear()
